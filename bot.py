@@ -18,6 +18,8 @@ from aiogram.types import (
     Message,
 )
 from dotenv import load_dotenv
+from flask import Flask
+from threading import Thread
 
 load_dotenv()  # .env faylidagi o'zgaruvchilarni yuklaydi
 
@@ -32,6 +34,8 @@ if not BOT_TOKEN:
     )
 
 DUEL_RANGE = 100  # Duel rejimida hamma doim 1 dan shu songacha o'ynaydi (adolatli matchmaking uchun)
+
+ADMIN_ID = 8612968177  # Faqat shu Telegram ID /admin_stats buyrug'ini ishlata oladi
 
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "guessin_game.db")
 
@@ -191,6 +195,14 @@ def record_duel_result(winner_id: int, winner_name: str, loser_id: int, loser_na
     conn.close()
 
 
+def record_user_seen(user_id: int, name: str) -> None:
+    """/start bosgan har bir foydalanuvchini jadvalga yozib qo'yadi (o'ynasa ham, o'ynamasa ham)."""
+    conn = sqlite3.connect(DB_PATH)
+    _ensure_user(conn, user_id, name)
+    conn.commit()
+    conn.close()
+
+
 def get_user_stats(user_id: int) -> dict | None:
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
@@ -210,6 +222,13 @@ def get_leaderboard(limit: int = 10) -> list[dict]:
     ).fetchall()
     conn.close()
     return [dict(row) for row in rows]
+
+
+def get_total_users() -> int:
+    conn = sqlite3.connect(DB_PATH)
+    count = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+    conn.close()
+    return count
 
 
 def language_keyboard() -> InlineKeyboardMarkup:
@@ -268,8 +287,17 @@ def other_user_state(bot: Bot, chat_id: int, user_id: int) -> FSMContext:
 
 @dp.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
+    record_user_seen(message.from_user.id, message.from_user.first_name or message.from_user.username or "Player")
     await state.set_state(GameStates.choosing_language)
     await message.answer(TEXTS["uz"]["choose_lang"], reply_markup=language_keyboard())
+
+
+@dp.message(F.text == "/admin_stats")
+async def admin_stats(message: Message):
+    if message.from_user.id != ADMIN_ID:
+        return  # Admin bo'lmagan odamga hech qanday javob berilmaydi
+    total = get_total_users()
+    await message.answer(f"👥 Botdan jami foydalanuvchilar: {total} kishi")
 
 
 @dp.callback_query(F.data.in_({"lang_uz", "lang_en"}))
@@ -543,7 +571,29 @@ async def handle_duel_guess(message: Message, state: FSMContext):
     del active_duels[duel_id]
 
 
+# --- Keep-alive server (Replit'ni doim uyg'oq tutish uchun) ---
+# UptimeRobot shu "/" manzilga har necha daqiqada ping yuboradi,
+# shunda Replit loyihasi "uxlab qolmaydi".
+
+app = Flask('')
+
+
+@app.route('/')
+def home():
+    return "Bot ishlayapti!"
+
+
+def run():
+    app.run(host='0.0.0.0', port=8080)
+
+
+def keep_alive():
+    t = Thread(target=run)
+    t.start()
+
+
 async def main():
+    keep_alive()
     init_db()
     bot = Bot(token=BOT_TOKEN)
     await dp.start_polling(bot)
