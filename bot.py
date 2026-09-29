@@ -3,7 +3,9 @@ import asyncio
 import logging
 import os
 import random
-import sqlite3
+
+import psycopg2
+import psycopg2.extras
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart
@@ -37,7 +39,12 @@ DUEL_RANGE = 100  # Duel rejimida hamma doim 1 dan shu songacha o'ynaydi (adolat
 
 ADMIN_ID = 8612968177  # Faqat shu Telegram ID /admin_stats buyrug'ini ishlata oladi
 
-DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "guessin_game.db")
+DATABASE_URL = os.environ.get("DATABASE_URL")
+if not DATABASE_URL:
+    raise RuntimeError(
+        "DATABASE_URL topilmadi! Render'ning Environment bo'limiga Neon'dan "
+        "olingan connection string'ni DATABASE_URL nomi bilan qo'shing."
+    )
 
 TEXTS = {
     "uz": {
@@ -135,15 +142,20 @@ active_duels: dict[int, dict] = {}  # duel_id -> {"secret", "finished", "players
 next_duel_id = 1
 
 
-# --- Statistika bazasi (SQLite) ---
+# --- Statistika bazasi (Postgres / Neon) ---
+
+
+def get_conn():
+    return psycopg2.connect(DATABASE_URL, sslmode="require")
 
 
 def init_db() -> None:
-    conn = sqlite3.connect(DB_PATH)
-    conn.execute(
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
         """
         CREATE TABLE IF NOT EXISTS users (
-            user_id INTEGER PRIMARY KEY,
+            user_id BIGINT PRIMARY KEY,
             name TEXT NOT NULL,
             games_played INTEGER NOT NULL DEFAULT 0,
             total_attempts INTEGER NOT NULL DEFAULT 0,
@@ -154,79 +166,93 @@ def init_db() -> None:
         """
     )
     conn.commit()
+    cur.close()
     conn.close()
 
 
-def _ensure_user(conn: sqlite3.Connection, user_id: int, name: str) -> None:
-    conn.execute(
-        "INSERT INTO users (user_id, name) VALUES (?, ?) "
-        "ON CONFLICT(user_id) DO UPDATE SET name = excluded.name",
+def _ensure_user(cur, user_id: int, name: str) -> None:
+    cur.execute(
+        "INSERT INTO users (user_id, name) VALUES (%s, %s) "
+        "ON CONFLICT (user_id) DO UPDATE SET name = EXCLUDED.name",
         (user_id, name),
     )
 
 
 def record_single_game(user_id: int, name: str, attempts: int) -> None:
-    conn = sqlite3.connect(DB_PATH)
-    _ensure_user(conn, user_id, name)
-    conn.execute(
+    conn = get_conn()
+    cur = conn.cursor()
+    _ensure_user(cur, user_id, name)
+    cur.execute(
         """
         UPDATE users
         SET games_played = games_played + 1,
-            total_attempts = total_attempts + ?,
+            total_attempts = total_attempts + %s,
             best_attempts = CASE
-                WHEN best_attempts IS NULL OR ? < best_attempts THEN ?
+                WHEN best_attempts IS NULL OR %s < best_attempts THEN %s
                 ELSE best_attempts
             END
-        WHERE user_id = ?
+        WHERE user_id = %s
         """,
         (attempts, attempts, attempts, user_id),
     )
     conn.commit()
+    cur.close()
     conn.close()
 
 
 def record_duel_result(winner_id: int, winner_name: str, loser_id: int, loser_name: str) -> None:
-    conn = sqlite3.connect(DB_PATH)
-    _ensure_user(conn, winner_id, winner_name)
-    _ensure_user(conn, loser_id, loser_name)
-    conn.execute("UPDATE users SET duel_wins = duel_wins + 1 WHERE user_id = ?", (winner_id,))
-    conn.execute("UPDATE users SET duel_losses = duel_losses + 1 WHERE user_id = ?", (loser_id,))
+    conn = get_conn()
+    cur = conn.cursor()
+    _ensure_user(cur, winner_id, winner_name)
+    _ensure_user(cur, loser_id, loser_name)
+    cur.execute("UPDATE users SET duel_wins = duel_wins + 1 WHERE user_id = %s", (winner_id,))
+    cur.execute("UPDATE users SET duel_losses = duel_losses + 1 WHERE user_id = %s", (loser_id,))
     conn.commit()
+    cur.close()
     conn.close()
 
 
 def record_user_seen(user_id: int, name: str) -> None:
     """/start bosgan har bir foydalanuvchini jadvalga yozib qo'yadi (o'ynasa ham, o'ynamasa ham)."""
-    conn = sqlite3.connect(DB_PATH)
-    _ensure_user(conn, user_id, name)
+    conn = get_conn()
+    cur = conn.cursor()
+    _ensure_user(cur, user_id, name)
     conn.commit()
+    cur.close()
     conn.close()
 
 
 def get_user_stats(user_id: int) -> dict | None:
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    row = conn.execute("SELECT * FROM users WHERE user_id = ?", (user_id,)).fetchone()
+    conn = get_conn()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    cur.execute("SELECT * FROM users WHERE user_id = %s", (user_id,))
+    row = cur.fetchone()
+    cur.close()
     conn.close()
     return dict(row) if row else None
 
 
 def get_leaderboard(limit: int = 10) -> list[dict]:
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    rows = conn.execute(
+    conn = get_conn()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    cur.execute(
         "SELECT name, duel_wins, duel_losses FROM users "
         "WHERE duel_wins > 0 OR duel_losses > 0 "
-        "ORDER BY duel_wins DESC, duel_losses ASC LIMIT ?",
+        "ORDER BY duel_wins DESC, duel_losses ASC LIMIT %s",
         (limit,),
-    ).fetchall()
+    )
+    rows = cur.fetchall()
+    cur.close()
     conn.close()
     return [dict(row) for row in rows]
 
 
 def get_total_users() -> int:
-    conn = sqlite3.connect(DB_PATH)
-    count = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) FROM users")
+    count = cur.fetchone()[0]
+    cur.close()
     conn.close()
     return count
 
