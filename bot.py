@@ -157,6 +157,7 @@ def init_db() -> None:
         CREATE TABLE IF NOT EXISTS users (
             user_id BIGINT PRIMARY KEY,
             name TEXT NOT NULL,
+            username TEXT,
             games_played INTEGER NOT NULL DEFAULT 0,
             total_attempts INTEGER NOT NULL DEFAULT 0,
             best_attempts INTEGER,
@@ -165,23 +166,25 @@ def init_db() -> None:
         )
         """
     )
+    # Eski bazalarda username ustuni bo'lmasligi mumkin — bo'lmasa qo'shib qo'yamiz
+    cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS username TEXT")
     conn.commit()
     cur.close()
     conn.close()
 
 
-def _ensure_user(cur, user_id: int, name: str) -> None:
+def _ensure_user(cur, user_id: int, name: str, username: str | None = None) -> None:
     cur.execute(
-        "INSERT INTO users (user_id, name) VALUES (%s, %s) "
-        "ON CONFLICT (user_id) DO UPDATE SET name = EXCLUDED.name",
-        (user_id, name),
+        "INSERT INTO users (user_id, name, username) VALUES (%s, %s, %s) "
+        "ON CONFLICT (user_id) DO UPDATE SET name = EXCLUDED.name, username = EXCLUDED.username",
+        (user_id, name, username),
     )
 
 
-def record_single_game(user_id: int, name: str, attempts: int) -> None:
+def record_single_game(user_id: int, name: str, attempts: int, username: str | None = None) -> None:
     conn = get_conn()
     cur = conn.cursor()
-    _ensure_user(cur, user_id, name)
+    _ensure_user(cur, user_id, name, username)
     cur.execute(
         """
         UPDATE users
@@ -200,11 +203,18 @@ def record_single_game(user_id: int, name: str, attempts: int) -> None:
     conn.close()
 
 
-def record_duel_result(winner_id: int, winner_name: str, loser_id: int, loser_name: str) -> None:
+def record_duel_result(
+    winner_id: int,
+    winner_name: str,
+    loser_id: int,
+    loser_name: str,
+    winner_username: str | None = None,
+    loser_username: str | None = None,
+) -> None:
     conn = get_conn()
     cur = conn.cursor()
-    _ensure_user(cur, winner_id, winner_name)
-    _ensure_user(cur, loser_id, loser_name)
+    _ensure_user(cur, winner_id, winner_name, winner_username)
+    _ensure_user(cur, loser_id, loser_name, loser_username)
     cur.execute("UPDATE users SET duel_wins = duel_wins + 1 WHERE user_id = %s", (winner_id,))
     cur.execute("UPDATE users SET duel_losses = duel_losses + 1 WHERE user_id = %s", (loser_id,))
     conn.commit()
@@ -212,14 +222,24 @@ def record_duel_result(winner_id: int, winner_name: str, loser_id: int, loser_na
     conn.close()
 
 
-def record_user_seen(user_id: int, name: str) -> None:
+def record_user_seen(user_id: int, name: str, username: str | None = None) -> None:
     """/start bosgan har bir foydalanuvchini jadvalga yozib qo'yadi (o'ynasa ham, o'ynamasa ham)."""
     conn = get_conn()
     cur = conn.cursor()
-    _ensure_user(cur, user_id, name)
+    _ensure_user(cur, user_id, name, username)
     conn.commit()
     cur.close()
     conn.close()
+
+
+def get_all_users() -> list[dict]:
+    conn = get_conn()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    cur.execute("SELECT user_id, name, username FROM users ORDER BY user_id")
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    return [dict(row) for row in rows]
 
 
 def get_user_stats(user_id: int) -> dict | None:
@@ -313,7 +333,11 @@ def other_user_state(bot: Bot, chat_id: int, user_id: int) -> FSMContext:
 
 @dp.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
-    record_user_seen(message.from_user.id, message.from_user.first_name or message.from_user.username or "Player")
+    record_user_seen(
+        message.from_user.id,
+        message.from_user.first_name or message.from_user.username or "Player",
+        message.from_user.username,
+    )
     await state.set_state(GameStates.choosing_language)
     await message.answer(TEXTS["uz"]["choose_lang"], reply_markup=language_keyboard())
 
@@ -324,6 +348,38 @@ async def admin_stats(message: Message):
         return  # Admin bo'lmagan odamga hech qanday javob berilmaydi
     total = get_total_users()
     await message.answer(f"👥 Botdan jami foydalanuvchilar: {total} kishi")
+
+
+@dp.message(F.text == "/admin_users")
+async def admin_users(message: Message, bot: Bot):
+    if message.from_user.id != ADMIN_ID:
+        return  # Admin bo'lmagan odamga hech qanday javob berilmaydi
+
+    users = get_all_users()
+    if not users:
+        await message.answer("👥 Hali hech kim botdan foydalanmagan.")
+        return
+
+    for u in users:
+        username_line = f"@{u['username']}" if u["username"] else "username yo'q"
+        caption = (
+            f"👤 {u['name']}\n"
+            f"🔗 {username_line}\n"
+            f"🆔 <a href='tg://user?id={u['user_id']}'>{u['user_id']}</a>"
+        )
+
+        photo_sent = False
+        try:
+            photos = await bot.get_user_profile_photos(u["user_id"], limit=1)
+            if photos.total_count > 0:
+                file_id = photos.photos[0][-1].file_id
+                await message.answer_photo(file_id, caption=caption, parse_mode="HTML")
+                photo_sent = True
+        except Exception:
+            pass  # Rasm olinmasa, pastda oddiy matn sifatida yuboramiz
+
+        if not photo_sent:
+            await message.answer(caption + "\n🖼 Profil rasmi yo'q/yashirin", parse_mode="HTML")
 
 
 @dp.callback_query(F.data.in_({"lang_uz", "lang_en"}))
@@ -389,7 +445,12 @@ async def handle_guess(message: Message, state: FSMContext):
     elif guess > secret_number:
         await message.answer(t["lower"])
     else:
-        record_single_game(message.from_user.id, message.from_user.first_name or "Player", attempts)
+        record_single_game(
+            message.from_user.id,
+            message.from_user.first_name or "Player",
+            attempts,
+            message.from_user.username,
+        )
         await state.set_state(GameStates.main_menu)
         await message.answer(t["correct"].format(attempts=attempts), reply_markup=menu_button_keyboard(t))
 
