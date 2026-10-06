@@ -61,10 +61,10 @@ TEXTS = {
         "btn_age": "6️⃣ Umr hisoblagich",
         "soon": "⏳ Bu qism hali tayyor emas. Tez orada qo'shamiz!",
         "age_title": "🎂 Umr hisoblagich",
-        "age_prompt": "Tug'ilgan sanangizni kiriting:\nNamuna: 15.06.2000",
-        "age_invalid": "❌ Noto'g'ri format. Iltimos quyidagi formatdan foydalaning: 15.06.2000",
+        "age_prompt": "Tug'ilgan sanangizni kiriting:\nNamuna: 01.07.2026",
+        "age_invalid": "❌ Noto'g'ri format. Iltimos quyidagi formatdan foydalaning: 01.07.2026",
         "age_future": "❌ Tug'ilgan sana kelajakdagi vaqt bo'la olmaydi. Iltimos, to'g'ri sanani kiriting.",
-        "age_result": "🧮 Sizning yoringiz:\n\n{years} yil\n{months} oy\n{weeks} hafta\n{days} kun\n{hours} soat\n{minutes} daqiqa\n{seconds} soniya",
+        "age_result": "🧮 Siz {years} yil {months} oy {weeks} hafta {days} kun {hours} soat {minutes} daqiqa {seconds} soniya yashagansiz.",
         "difficulty_title": "🎯 Qiyinchilik darajasini tanlang:",
         "btn_easy": "🟢 Easy (1-50)",
         "btn_medium": "🟡 Medium (1-100)",
@@ -104,10 +104,10 @@ TEXTS = {
         "btn_age": "6️⃣ Age Calculator",
         "soon": "⏳ This part is not ready yet. We will add it soon!",
         "age_title": "🎂 Age Calculator",
-        "age_prompt": "Enter your birth date:\nExample: 15.06.2000",
-        "age_invalid": "❌ Wrong format. Please use this format: 15.06.2000",
+        "age_prompt": "Enter your birth date:\nExample: 01.07.2026",
+        "age_invalid": "❌ Wrong format. Please use this format: 01.07.2026",
         "age_future": "❌ Birth date cannot be in the future. Please enter a valid date.",
-        "age_result": "🧮 Your age is:\n\n{years} years\n{months} months\n{weeks} weeks\n{days} days\n{hours} hours\n{minutes} minutes\n{seconds} seconds",
+        "age_result": "🧮 You have lived for {years} years {months} months {weeks} weeks {days} days {hours} hours {minutes} minutes {seconds} seconds.",
         "difficulty_title": "🎯 Choose difficulty:",
         "btn_easy": "🟢 Easy (1-50)",
         "btn_medium": "🟡 Medium (1-100)",
@@ -331,36 +331,37 @@ def parse_birth_date(value: str):
 
 
 def calculate_age_components(birth_date, now: datetime):
-    start = birth_date
-    years = 0
+    now_date = now.date()
+    if birth_date > now_date:
+        raise ValueError("Birth date cannot be in the future.")
 
-    while True:
-        next_year = add_months(start, 12)
-        if next_year > now.date():
-            break
-        start = next_year
-        years += 1
+    years = now_date.year - birth_date.year
+    months = now_date.month - birth_date.month
 
-    months = 0
-    while True:
-        next_month = add_months(start, 1)
-        if next_month > now.date():
-            break
-        start = next_month
-        months += 1
+    if now_date.day < birth_date.day:
+        months -= 1
 
-    remaining = now - datetime.combine(start, datetime.min.time())
-    total_seconds = int(remaining.total_seconds())
-    weeks = remaining.days // 7
-    days = remaining.days % 7
-    hours, remainder = divmod(total_seconds, 3600)
+    if months < 0:
+        years -= 1
+        months += 12
+
+    anniversary = add_months(birth_date, years * 12 + months)
+    days = (now_date - anniversary).days
+
+    total_seconds = int((now - datetime.combine(birth_date, datetime.min.time())).total_seconds())
+    days_from_start = total_seconds // 86400
+    remaining_seconds = total_seconds - (days_from_start * 86400)
+    hours, remainder = divmod(remaining_seconds, 3600)
     minutes, seconds = divmod(remainder, 60)
+
+    weeks = days // 7
+    days_in_week = days % 7
 
     return {
         "years": years,
         "months": months,
         "weeks": weeks,
-        "days": days,
+        "days": days_in_week,
         "hours": hours,
         "minutes": minutes,
         "seconds": seconds,
