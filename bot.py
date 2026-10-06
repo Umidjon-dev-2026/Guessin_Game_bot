@@ -1,8 +1,10 @@
 # TELGRAM BOT: "Guessin Game"
 import asyncio
+import calendar
 import logging
 import os
 import random
+from datetime import datetime, timedelta
 
 import psycopg2
 import psycopg2.extras
@@ -56,7 +58,13 @@ TEXTS = {
         "btn_stats": "3️⃣ Statistikam",
         "btn_rating": "4️⃣ Reyting",
         "btn_lang": "5️⃣ Tilni o'zgartirish",
+        "btn_age": "6️⃣ Umr hisoblagich",
         "soon": "⏳ Bu qism hali tayyor emas. Tez orada qo'shamiz!",
+        "age_title": "🎂 Umr hisoblagich",
+        "age_prompt": "Tug'ilgan sanangizni kiriting:\nNamuna: 15.06.2000",
+        "age_invalid": "❌ Noto'g'ri format. Iltimos quyidagi formatdan foydalaning: 15.06.2000",
+        "age_future": "❌ Tug'ilgan sana kelajakdagi vaqt bo'la olmaydi. Iltimos, to'g'ri sanani kiriting.",
+        "age_result": "🧮 Sizning yoringiz:\n\n{years} yil\n{months} oy\n{weeks} hafta\n{days} kun\n{hours} soat\n{minutes} daqiqa\n{seconds} soniya",
         "difficulty_title": "🎯 Qiyinchilik darajasini tanlang:",
         "btn_easy": "🟢 Easy (1-50)",
         "btn_medium": "🟡 Medium (1-100)",
@@ -93,7 +101,13 @@ TEXTS = {
         "btn_stats": "3️⃣ My Statistics",
         "btn_rating": "4️⃣ Leaderboard",
         "btn_lang": "5️⃣ Change Language",
+        "btn_age": "6️⃣ Age Calculator",
         "soon": "⏳ This part is not ready yet. We will add it soon!",
+        "age_title": "🎂 Age Calculator",
+        "age_prompt": "Enter your birth date:\nExample: 15.06.2000",
+        "age_invalid": "❌ Wrong format. Please use this format: 15.06.2000",
+        "age_future": "❌ Birth date cannot be in the future. Please enter a valid date.",
+        "age_result": "🧮 Your age is:\n\n{years} years\n{months} months\n{weeks} weeks\n{days} days\n{hours} hours\n{minutes} minutes\n{seconds} seconds",
         "difficulty_title": "🎯 Choose difficulty:",
         "btn_easy": "🟢 Easy (1-50)",
         "btn_medium": "🟡 Medium (1-100)",
@@ -131,6 +145,7 @@ class GameStates(StatesGroup):
     guessing = State()
     duel_waiting = State()
     duel_guessing = State()
+    age_calculating = State()
 
 
 storage = MemoryStorage()
@@ -294,8 +309,62 @@ def main_menu_keyboard(t: dict) -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text=t["btn_stats"], callback_data="menu_stats")],
             [InlineKeyboardButton(text=t["btn_rating"], callback_data="menu_rating")],
             [InlineKeyboardButton(text=t["btn_lang"], callback_data="menu_lang")],
+            [InlineKeyboardButton(text=t["btn_age"], callback_data="menu_age")],
         ]
     )
+
+
+def add_months(base_date: datetime.date, months: int):
+    year = base_date.year + (base_date.month - 1 + months) // 12
+    month = (base_date.month - 1 + months) % 12 + 1
+    day = min(base_date.day, calendar.monthrange(year, month)[1])
+    return datetime.strptime(f"{year}-{month:02d}-{day:02d}", "%Y-%m-%d").date()
+
+
+def parse_birth_date(value: str):
+    for fmt in ("%d.%m.%Y", "%d/%m/%Y", "%Y-%m-%d", "%Y/%m/%d"):
+        try:
+            return datetime.strptime(value.strip(), fmt).date()
+        except ValueError:
+            continue
+    raise ValueError("Invalid date")
+
+
+def calculate_age_components(birth_date, now: datetime):
+    start = birth_date
+    years = 0
+
+    while True:
+        next_year = add_months(start, 12)
+        if next_year > now.date():
+            break
+        start = next_year
+        years += 1
+
+    months = 0
+    while True:
+        next_month = add_months(start, 1)
+        if next_month > now.date():
+            break
+        start = next_month
+        months += 1
+
+    remaining = now - datetime.combine(start, datetime.min.time())
+    total_seconds = int(remaining.total_seconds())
+    weeks = remaining.days // 7
+    days = remaining.days % 7
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+
+    return {
+        "years": years,
+        "months": months,
+        "weeks": weeks,
+        "days": days,
+        "hours": hours,
+        "minutes": minutes,
+        "seconds": seconds,
+    }
 
 
 def difficulty_keyboard(t: dict) -> InlineKeyboardMarkup:
@@ -501,6 +570,56 @@ async def menu_change_language(callback: CallbackQuery, state: FSMContext):
     await state.set_state(GameStates.choosing_language)
     await callback.message.answer(TEXTS["uz"]["choose_lang"], reply_markup=language_keyboard())
     await callback.answer()
+
+
+@dp.callback_query(F.data == "menu_age")
+async def menu_age(callback: CallbackQuery, state: FSMContext):
+    language = await get_language(state)
+    t = TEXTS[language]
+    await state.set_state(GameStates.age_calculating)
+    await callback.message.answer(t["age_prompt"], reply_markup=menu_button_keyboard(t))
+    await callback.answer()
+
+
+@dp.message(F.text.lower().in_({"/age", "/umur"}))
+async def command_age(message: Message, state: FSMContext):
+    language = await get_language(state)
+    t = TEXTS[language]
+    await state.set_state(GameStates.age_calculating)
+    await message.answer(t["age_prompt"], reply_markup=menu_button_keyboard(t))
+
+
+@dp.message(GameStates.age_calculating)
+async def handle_age_calculation(message: Message, state: FSMContext):
+    language = await get_language(state)
+    t = TEXTS[language]
+    raw_text = message.text.strip()
+
+    try:
+        birth_date = parse_birth_date(raw_text)
+    except ValueError:
+        await message.answer(t["age_invalid"], reply_markup=menu_button_keyboard(t))
+        return
+
+    now = datetime.now()
+    if birth_date > now.date():
+        await message.answer(t["age_future"], reply_markup=menu_button_keyboard(t))
+        return
+
+    result = calculate_age_components(birth_date, now)
+    await state.set_state(GameStates.main_menu)
+    await message.answer(
+        t["age_result"].format(
+            years=result["years"],
+            months=result["months"],
+            weeks=result["weeks"],
+            days=result["days"],
+            hours=result["hours"],
+            minutes=result["minutes"],
+            seconds=result["seconds"],
+        ),
+        reply_markup=main_menu_keyboard(t),
+    )
 
 
 # --- Duel / Matchmaking ---

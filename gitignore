@@ -1,0 +1,15 @@
+# Maxfiy ma'lumotlar
+.env
+
+# Ma'lumotlar bazasi
+*.db
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# IDE
+.vscode/
+.idea/
