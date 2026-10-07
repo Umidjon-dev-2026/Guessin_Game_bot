@@ -4,12 +4,14 @@ import calendar
 import logging
 import os
 import random
-from datetime import datetime, timedelta
+from datetime import date, datetime, time, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import psycopg2
 import psycopg2.extras
 
 from aiogram import Bot, Dispatcher, F
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -39,6 +41,14 @@ if not BOT_TOKEN:
 
 DUEL_RANGE = 100  # Duel rejimida hamma doim 1 dan shu songacha o'ynaydi (adolatli matchmaking uchun)
 
+# Umr hisoblagich: server (Render) UTC da ishlaydi, shuning uchun vaqt aniq Toshkent bo'yicha olinadi
+try:
+    TZ = ZoneInfo("Asia/Tashkent")
+except Exception:  # tzdata o'rnatilmagan bo'lsa (Toshkentda yozgi vaqt yo'q, doim UTC+5)
+    TZ = timezone(timedelta(hours=5))
+AGE_MIN_YEAR = 1920  # tanlash mumkin bo'lgan eng eski yil
+AGE_YEARS_PER_PAGE = 12
+
 ADMIN_ID = 8612968177  # Faqat shu Telegram ID /admin_stats buyrug'ini ishlata oladi
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
@@ -60,11 +70,19 @@ TEXTS = {
         "btn_lang": "5️⃣ Tilni o'zgartirish",
         "btn_age": "6️⃣ Umr hisoblagich",
         "soon": "⏳ Bu qism hali tayyor emas. Tez orada qo'shamiz!",
-        "age_title": "🎂 Umr hisoblagich",
-        "age_prompt": "Tug'ilgan sanangizni kiriting:\nNamuna: 01.07.2026",
-        "age_invalid": "❌ Noto'g'ri format. Iltimos quyidagi formatdan foydalaning: 01.07.2026",
-        "age_future": "❌ Tug'ilgan sana kelajakdagi vaqt bo'la olmaydi. Iltimos, to'g'ri sanani kiriting.",
-        "age_result": "🧮 Siz {years} yil {months} oy {weeks} hafta {days} kun {hours} soat {minutes} daqiqa {seconds} soniya yashagansiz.",
+        "age_prompt": "🎂 Umr hisoblagich\n\nTug'ilgan sanangizni tugmalar orqali tanlang: avval yil, keyin oy, keyin kun.\nNamuna: 01.07.2011\n\n📅 Yilni tanlang:",
+        "age_pick_month": "🎂 Yil: {year}\n\n📅 Oyni tanlang:",
+        "age_pick_day": "🎂 Yil: {year}, oy: {month}\n\n📅 Kunni tanlang:",
+        "age_months": ["Yanvar", "Fevral", "Mart", "Aprel", "May", "Iyun", "Iyul", "Avgust", "Sentabr", "Oktabr", "Noyabr", "Dekabr"],
+        "age_result": "🎂 Tug'ilgan sana: {birth}\n🕒 Hozir: {now}\n\n📅 Aniq yosh: {years} yil, {months} oy, {days} kun\n\n• Oy: {total_months} oy (+ {extra_days} kun)\n• Kun: {total_days} kun\n• Hafta: {total_weeks} hafta (+ {extra_week_days} kun)\n• Soat: {total_hours} soat\n• Daqiqa: {total_minutes} daqiqa\n• Soniya: {total_seconds} soniya\n\n{next}\n\n(Tug'ilgan vaqt 00:00 deb olindi, kabisa yillari hisobga olingan.)",
+        "age_next": "🎁 Keyingi tug'ilgan kunga: {days} kun",
+        "age_birthday_today": "🎉 Bugun tug'ilgan kuningiz muborak bo'lsin!",
+        "age_future": "❌ Tug'ilgan sana kelajakda bo'la olmaydi.",
+        "age_btn_newer": "⬅️ Yangiroq",
+        "age_btn_older": "Eskiroq ➡️",
+        "age_btn_year": "⬅️ Yilni o'zgartirish",
+        "age_btn_month": "⬅️ Oyni o'zgartirish",
+        "age_again": "🔄 Boshqa sana",
         "difficulty_title": "🎯 Qiyinchilik darajasini tanlang:",
         "btn_easy": "🟢 Easy (1-50)",
         "btn_medium": "🟡 Medium (1-100)",
@@ -103,11 +121,19 @@ TEXTS = {
         "btn_lang": "5️⃣ Change Language",
         "btn_age": "6️⃣ Age Calculator",
         "soon": "⏳ This part is not ready yet. We will add it soon!",
-        "age_title": "🎂 Age Calculator",
-        "age_prompt": "Enter your birth date:\nExample: 01.07.2026",
-        "age_invalid": "❌ Wrong format. Please use this format: 01.07.2026",
-        "age_future": "❌ Birth date cannot be in the future. Please enter a valid date.",
-        "age_result": "🧮 You have lived for {years} years {months} months {weeks} weeks {days} days {hours} hours {minutes} minutes {seconds} seconds.",
+        "age_prompt": "🎂 Age Calculator\n\nPick your birth date with the buttons: year first, then month, then day.\nExample: 01.07.2011\n\n📅 Choose the year:",
+        "age_pick_month": "🎂 Year: {year}\n\n📅 Choose the month:",
+        "age_pick_day": "🎂 Year: {year}, month: {month}\n\n📅 Choose the day:",
+        "age_months": ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"],
+        "age_result": "🎂 Birth date: {birth}\n🕒 Now: {now}\n\n📅 Exact age: {years} years, {months} months, {days} days\n\n• Months: {total_months} months (+ {extra_days} days)\n• Days: {total_days} days\n• Weeks: {total_weeks} weeks (+ {extra_week_days} days)\n• Hours: {total_hours} hours\n• Minutes: {total_minutes} minutes\n• Seconds: {total_seconds} seconds\n\n{next}\n\n(Birth time is taken as 00:00, leap years are included.)",
+        "age_next": "🎁 Next birthday in: {days} days",
+        "age_birthday_today": "🎉 Happy birthday today!",
+        "age_future": "❌ Birth date cannot be in the future.",
+        "age_btn_newer": "⬅️ Newer",
+        "age_btn_older": "Older ➡️",
+        "age_btn_year": "⬅️ Change year",
+        "age_btn_month": "⬅️ Change month",
+        "age_again": "🔄 Another date",
         "difficulty_title": "🎯 Choose difficulty:",
         "btn_easy": "🟢 Easy (1-50)",
         "btn_medium": "🟡 Medium (1-100)",
@@ -145,7 +171,6 @@ class GameStates(StatesGroup):
     guessing = State()
     duel_waiting = State()
     duel_guessing = State()
-    age_calculating = State()
 
 
 storage = MemoryStorage()
@@ -314,58 +339,157 @@ def main_menu_keyboard(t: dict) -> InlineKeyboardMarkup:
     )
 
 
-def add_months(base_date: datetime.date, months: int):
-    year = base_date.year + (base_date.month - 1 + months) // 12
-    month = (base_date.month - 1 + months) % 12 + 1
-    day = min(base_date.day, calendar.monthrange(year, month)[1])
-    return datetime.strptime(f"{year}-{month:02d}-{day:02d}", "%Y-%m-%d").date()
+def add_months(base: date, months: int) -> date:
+    """base sanasiga `months` oy qo'shadi. Kun oy oxiridan oshsa, oy oxiriga tushadi."""
+    idx = base.year * 12 + (base.month - 1) + months
+    year, month0 = divmod(idx, 12)
+    month = month0 + 1
+    day = min(base.day, calendar.monthrange(year, month)[1])
+    return date(year, month, day)
 
 
-def parse_birth_date(value: str):
-    for fmt in ("%d.%m.%Y", "%d/%m/%Y", "%Y-%m-%d", "%Y/%m/%d"):
-        try:
-            return datetime.strptime(value.strip(), fmt).date()
-        except ValueError:
-            continue
-    raise ValueError("Invalid date")
+def next_birthday_in_days(birth: date, today: date) -> int:
+    for year in (today.year, today.year + 1):
+        day = birth.day
+        if birth.month == 2 and day == 29 and not calendar.isleap(year):
+            day = 28
+        candidate = date(year, birth.month, day)
+        if candidate >= today:
+            return (candidate - today).days
+    return 0
 
 
-def calculate_age_components(birth_date, now: datetime):
-    now_date = now.date()
-    if birth_date > now_date:
+def calculate_age(birth_date: date, now: datetime) -> dict:
+    """
+    Tug'ilgan sana (soat 00:00) dan `now` gacha aniq kalendar bo'yicha hisob.
+    Kabisa yillari (29-fevral) va oylarning haqiqiy uzunligi hisobga olinadi.
+    Hammasi JAMI qiymat sifatida qaytadi (oy, kun, hafta, soat, daqiqa, soniya).
+    """
+    today = now.date()
+    if birth_date > today:
         raise ValueError("Birth date cannot be in the future.")
 
-    years = now_date.year - birth_date.year
-    months = now_date.month - birth_date.month
+    total_months = (today.year - birth_date.year) * 12 + (today.month - birth_date.month)
+    if add_months(birth_date, total_months) > today:
+        total_months -= 1
+    anniversary = add_months(birth_date, total_months)
 
-    if now_date.day < birth_date.day:
-        months -= 1
+    years, months = divmod(total_months, 12)
+    extra_days = (today - anniversary).days
 
-    if months < 0:
-        years -= 1
-        months += 12
-
-    anniversary = add_months(birth_date, years * 12 + months)
-    days = (now_date - anniversary).days
-
-    total_seconds = int((now - datetime.combine(birth_date, datetime.min.time())).total_seconds())
-    days_from_start = total_seconds // 86400
-    remaining_seconds = total_seconds - (days_from_start * 86400)
-    hours, remainder = divmod(remaining_seconds, 3600)
-    minutes, seconds = divmod(remainder, 60)
-
-    weeks = days // 7
-    days_in_week = days % 7
+    total_days = (today - birth_date).days
+    birth_dt = datetime.combine(birth_date, time(0, 0), tzinfo=now.tzinfo)
+    total_seconds = int((now - birth_dt).total_seconds())
 
     return {
         "years": years,
         "months": months,
-        "weeks": weeks,
-        "days": days_in_week,
-        "hours": hours,
-        "minutes": minutes,
-        "seconds": seconds,
+        "days": extra_days,
+        "total_months": total_months,
+        "extra_days": extra_days,
+        "total_days": total_days,
+        "total_weeks": total_days // 7,
+        "extra_week_days": total_days % 7,
+        "total_hours": total_seconds // 3600,
+        "total_minutes": total_seconds // 60,
+        "total_seconds": total_seconds,
+        "next_birthday_in": next_birthday_in_days(birth_date, today),
     }
+
+
+def fmt_num(n: int) -> str:
+    return f"{n:,}".replace(",", " ")
+
+
+def format_age_result(t: dict, birth_date: date, now: datetime) -> str:
+    r = calculate_age(birth_date, now)
+    if r["next_birthday_in"] == 0:
+        next_line = t["age_birthday_today"]
+    else:
+        next_line = t["age_next"].format(days=r["next_birthday_in"])
+    return t["age_result"].format(
+        birth=birth_date.strftime("%d.%m.%Y"),
+        now=now.strftime("%d.%m.%Y %H:%M:%S"),
+        years=r["years"],
+        months=r["months"],
+        days=r["days"],
+        total_months=fmt_num(r["total_months"]),
+        extra_days=r["extra_days"],
+        total_days=fmt_num(r["total_days"]),
+        total_weeks=fmt_num(r["total_weeks"]),
+        extra_week_days=r["extra_week_days"],
+        total_hours=fmt_num(r["total_hours"]),
+        total_minutes=fmt_num(r["total_minutes"]),
+        total_seconds=fmt_num(r["total_seconds"]),
+        next=next_line,
+    )
+
+
+def _chunk(buttons: list, size: int) -> list:
+    return [buttons[i:i + size] for i in range(0, len(buttons), size)]
+
+
+def age_years_keyboard(t: dict, page_start: int, this_year: int) -> InlineKeyboardMarkup:
+    """page_start - sahifadagi eng katta yil; pastga qarab 12 ta yil ko'rsatiladi."""
+    years = [y for y in range(page_start, page_start - AGE_YEARS_PER_PAGE, -1) if y >= AGE_MIN_YEAR]
+    rows = _chunk(
+        [InlineKeyboardButton(text=str(y), callback_data=f"age:y:{y}") for y in years], 3
+    )
+    nav = []
+    if page_start < this_year:
+        nav.append(InlineKeyboardButton(
+            text=t["age_btn_newer"],
+            callback_data=f"age:yp:{min(page_start + AGE_YEARS_PER_PAGE, this_year)}",
+        ))
+    if page_start - AGE_YEARS_PER_PAGE >= AGE_MIN_YEAR:
+        nav.append(InlineKeyboardButton(
+            text=t["age_btn_older"],
+            callback_data=f"age:yp:{page_start - AGE_YEARS_PER_PAGE}",
+        ))
+    if nav:
+        rows.append(nav)
+    rows.append([InlineKeyboardButton(text=t["btn_menu"], callback_data="menu_back")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def age_months_keyboard(t: dict, year: int) -> InlineKeyboardMarkup:
+    now = datetime.now(TZ)
+    last_month = now.month if year == now.year else 12  # kelajak oylari ko'rsatilmaydi
+    rows = _chunk(
+        [
+            InlineKeyboardButton(text=t["age_months"][m - 1], callback_data=f"age:m:{year}:{m}")
+            for m in range(1, last_month + 1)
+        ],
+        3,
+    )
+    page_start = _age_year_page_start(year, now.year)
+    rows.append([InlineKeyboardButton(text=t["age_btn_year"], callback_data=f"age:yp:{page_start}")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def age_days_keyboard(t: dict, year: int, month: int) -> InlineKeyboardMarkup:
+    now = datetime.now(TZ)
+    last_day = calendar.monthrange(year, month)[1]  # kabisa yili shu yerda hisobga olinadi
+    if (year, month) == (now.year, now.month):
+        last_day = min(last_day, now.day)  # kelajak kunlari ko'rsatilmaydi
+    rows = _chunk(
+        [
+            InlineKeyboardButton(text=str(d), callback_data=f"age:d:{year}:{month}:{d}")
+            for d in range(1, last_day + 1)
+        ],
+        7,
+    )
+    rows.append([InlineKeyboardButton(text=t["age_btn_month"], callback_data=f"age:y:{year}")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def age_result_keyboard(t: dict) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=t["age_again"], callback_data="age:start")],
+            [InlineKeyboardButton(text=t["btn_menu"], callback_data="menu_back")],
+        ]
+    )
 
 
 def difficulty_keyboard(t: dict) -> InlineKeyboardMarkup:
@@ -573,12 +697,25 @@ async def menu_change_language(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
+def _age_year_page_start(year: int, this_year: int) -> int:
+    """Yil sahifalari this_year dan boshlab 12 yildan bo'linadi."""
+    return this_year - ((this_year - year) // 12) * 12
+
+
+async def _safe_edit(callback: CallbackQuery, text: str, markup: InlineKeyboardMarkup) -> None:
+    try:
+        await callback.message.edit_text(text, reply_markup=markup)
+    except TelegramBadRequest:
+        pass  # "message is not modified" - bir xil tugma qayta bosilganda
+
+
 @dp.callback_query(F.data == "menu_age")
 async def menu_age(callback: CallbackQuery, state: FSMContext):
     language = await get_language(state)
     t = TEXTS[language]
-    await state.set_state(GameStates.age_calculating)
-    await callback.message.answer(t["age_prompt"], reply_markup=menu_button_keyboard(t))
+    await state.set_state(GameStates.main_menu)
+    this_year = datetime.now(TZ).year
+    await callback.message.answer(t["age_prompt"], reply_markup=age_years_keyboard(t, this_year, this_year))
     await callback.answer()
 
 
@@ -586,41 +723,66 @@ async def menu_age(callback: CallbackQuery, state: FSMContext):
 async def command_age(message: Message, state: FSMContext):
     language = await get_language(state)
     t = TEXTS[language]
-    await state.set_state(GameStates.age_calculating)
-    await message.answer(t["age_prompt"], reply_markup=menu_button_keyboard(t))
-
-
-@dp.message(GameStates.age_calculating)
-async def handle_age_calculation(message: Message, state: FSMContext):
-    language = await get_language(state)
-    t = TEXTS[language]
-    raw_text = message.text.strip()
-
-    try:
-        birth_date = parse_birth_date(raw_text)
-    except ValueError:
-        await message.answer(t["age_invalid"], reply_markup=menu_button_keyboard(t))
-        return
-
-    now = datetime.now()
-    if birth_date > now.date():
-        await message.answer(t["age_future"], reply_markup=menu_button_keyboard(t))
-        return
-
-    result = calculate_age_components(birth_date, now)
     await state.set_state(GameStates.main_menu)
-    await message.answer(
-        t["age_result"].format(
-            years=result["years"],
-            months=result["months"],
-            weeks=result["weeks"],
-            days=result["days"],
-            hours=result["hours"],
-            minutes=result["minutes"],
-            seconds=result["seconds"],
-        ),
-        reply_markup=main_menu_keyboard(t),
-    )
+    this_year = datetime.now(TZ).year
+    await message.answer(t["age_prompt"], reply_markup=age_years_keyboard(t, this_year, this_year))
+
+
+@dp.callback_query(F.data == "age:start")
+async def age_start(callback: CallbackQuery, state: FSMContext):
+    t = TEXTS[await get_language(state)]
+    this_year = datetime.now(TZ).year
+    await _safe_edit(callback, t["age_prompt"], age_years_keyboard(t, this_year, this_year))
+    await callback.answer()
+
+
+@dp.callback_query(F.data.regexp(r"^age:yp:\d{4}$"))
+async def age_year_page(callback: CallbackQuery, state: FSMContext):
+    t = TEXTS[await get_language(state)]
+    this_year = datetime.now(TZ).year
+    page_start = int(callback.data.split(":")[2])
+    page_start = min(max(page_start, AGE_MIN_YEAR), this_year)
+    await _safe_edit(callback, t["age_prompt"], age_years_keyboard(t, page_start, this_year))
+    await callback.answer()
+
+
+@dp.callback_query(F.data.regexp(r"^age:y:\d{4}$"))
+async def age_pick_year(callback: CallbackQuery, state: FSMContext):
+    t = TEXTS[await get_language(state)]
+    this_year = datetime.now(TZ).year
+    year = int(callback.data.split(":")[2])
+    if not AGE_MIN_YEAR <= year <= this_year:
+        await callback.answer()
+        return
+    await _safe_edit(callback, t["age_pick_month"].format(year=year), age_months_keyboard(t, year))
+    await callback.answer()
+
+
+@dp.callback_query(F.data.regexp(r"^age:m:\d{4}:\d{1,2}$"))
+async def age_pick_month(callback: CallbackQuery, state: FSMContext):
+    t = TEXTS[await get_language(state)]
+    _, _, y, m = callback.data.split(":")
+    year, month = int(y), int(m)
+    if not (AGE_MIN_YEAR <= year <= datetime.now(TZ).year and 1 <= month <= 12):
+        await callback.answer()
+        return
+    text = t["age_pick_day"].format(year=year, month=t["age_months"][month - 1])
+    await _safe_edit(callback, text, age_days_keyboard(t, year, month))
+    await callback.answer()
+
+
+@dp.callback_query(F.data.regexp(r"^age:d:\d{4}:\d{1,2}:\d{1,2}$"))
+async def age_pick_day(callback: CallbackQuery, state: FSMContext):
+    t = TEXTS[await get_language(state)]
+    _, _, y, m, d = callback.data.split(":")
+    try:
+        birth = date(int(y), int(m), int(d))
+        text = format_age_result(t, birth, datetime.now(TZ))
+    except ValueError:
+        await callback.answer(t["age_future"], show_alert=True)
+        return
+    await _safe_edit(callback, text, age_result_keyboard(t))
+    await callback.answer()
 
 
 # --- Duel / Matchmaking ---
